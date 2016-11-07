@@ -30,6 +30,7 @@
 #include <linux/netfilter/nfnetlink_queue.h>
 #include <linux/netfilter/nf_conntrack_common.h>
 #include <linux/list.h>
+#include <linux/pid.h>
 #include <net/sock.h>
 #include <net/tcp_states.h>
 #include <net/netfilter/nf_queue.h>
@@ -278,6 +279,28 @@ nla_put_failure:
 	return -1;
 }
 
+static int nfqnl_put_sk_pid(struct sk_buff *skb, struct sock *sk)
+{
+	const struct pid *pid;
+
+	if (!sk_fullsock(sk))
+		return 0;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	if (sk->sk_socket && sk->sk_socket->file && sk->sk_socket->file->f_owner) {
+		pid = sk->sk_socket->file->f_owner->pid;
+		if (nla_put_be32(skb, NFQA_PID,
+		    htonl(pid_vnr(pid))))
+			goto nla_put_failure;
+	}
+	read_unlock_bh(&sk->sk_callback_lock);
+	return 0;
+
+nla_put_failure:
+	read_unlock_bh(&sk->sk_callback_lock);
+	return -1;
+}
+
 static u32 nfqnl_get_sk_secctx(struct sk_buff *skb, char **secdata)
 {
 	u32 seclen = 0;
@@ -434,6 +457,10 @@ nfqnl_build_packet_message(struct net *net, struct nfqnl_instance *queue,
 			+ nla_total_size(sizeof(u_int32_t)));	/* gid */
 	}
 
+	if (queue->flags & NFQA_CFG_F_PID) {
+		size += nla_total_size(sizeof(u_int32_t));
+  }
+
 	if ((queue->flags & NFQA_CFG_F_SECCTX) && entskb->sk) {
 		seclen = nfqnl_get_sk_secctx(entskb, &secdata);
 		if (seclen)
@@ -568,6 +595,10 @@ nfqnl_build_packet_message(struct net *net, struct nfqnl_instance *queue,
 
 	if ((queue->flags & NFQA_CFG_F_UID_GID) && entskb->sk &&
 	    nfqnl_put_sk_uidgid(skb, entskb->sk) < 0)
+		goto nla_put_failure;
+
+	if ((queue->flags & NFQA_CFG_F_PID) && entskb->sk &&
+	    nfqnl_put_sk_pid(skb, entskb->sk) < 0)
 		goto nla_put_failure;
 
 	if (seclen && nla_put(skb, NFQA_SECCTX, seclen, secdata))
